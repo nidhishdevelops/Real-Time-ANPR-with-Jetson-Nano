@@ -8,26 +8,21 @@ import pymysql
 from datetime import datetime
 from ultralytics import YOLO
 
-# Load Configuration
 with open("config.yaml", "r") as file:
     config = yaml.safe_load(file)
 
 with open("aws_config.yaml", "r") as file:
     aws_config = yaml.safe_load(file)
 
-# Initialize YOLO Model
 device = config["device"] if torch.cuda.is_available() or config["device"] == "cpu" else "cpu"
 model = YOLO(config["model_path"]).to(device)
 
-# Create necessary directories
 os.makedirs(os.path.join(config["save_dir"], "images"), exist_ok=True)
 os.makedirs(os.path.join(config["save_dir"], "text"), exist_ok=True)
 
-# AWS Clients
 s3 = boto3.client("s3", region_name=aws_config["s3_region"])
 textract = boto3.client("textract", region_name=aws_config["s3_region"])
 
-# RDS Database Connection
 try:
     conn = pymysql.connect(
         host=aws_config["rds_host"],
@@ -50,7 +45,6 @@ except pymysql.MySQLError as e:
     print(f"Database Connection Error: {e}")
     exit()
 
-# Open Camera
 cap = cv2.VideoCapture(config["source"])
 prev_time = time.time()
 
@@ -59,12 +53,10 @@ while cap.isOpened():
     if not ret:
         break
 
-    # Calculate FPS
     curr_time = time.time()
     fps = 1 / (curr_time - prev_time)
     prev_time = curr_time
 
-    # Run YOLOv8 Detection
     results = model(frame, imgsz=config["img_size"], conf=config["conf_threshold"], iou=config["iou_threshold"])[0]
     detections = results.boxes.data
 
@@ -72,25 +64,18 @@ while cap.isOpened():
 
     for i, box in enumerate(results.boxes.xyxy):
         x1, y1, x2, y2 = map(int, box[:4])
-
-        # Crop detected plate
         plate_crop = frame[y1:y2, x1:x2]
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         img_filename = f"plate_{timestamp}.jpg"
         img_path = os.path.join(config["save_dir"], "images", img_filename)
-
-        # Save image locally
+        
         cv2.imwrite(img_path, plate_crop)
-
-        # Upload to S3
         s3.upload_file(img_path, aws_config["s3_bucket"], img_filename)
         s3_url = f"https://{aws_config['s3_bucket']}.s3.{aws_config['s3_region']}.amazonaws.com/{img_filename}"
 
-        # OCR using Amazon Textract
         with open(img_path, "rb") as img_file:
             response = textract.detect_document_text(Document={"Bytes": img_file.read()})
 
-        # Extract text and confidence
         ocr_text = ""
         confidence = 0.0
         total_words = len(response.get("Blocks", []))
@@ -100,35 +85,28 @@ while cap.isOpened():
                 if block["BlockType"] == "LINE":
                     ocr_text += block["Text"] + " "
                     confidence += block["Confidence"]
-
             confidence /= total_words
 
-        # Save OCR text locally
         text_filename = f"plate_{timestamp}.txt"
         text_path = os.path.join(config["save_dir"], "text", text_filename)
         with open(text_path, "w") as f:
             f.write(f"Detected Text: {ocr_text.strip()}\nConfidence: {confidence:.2f}\n")
 
-        # Store OCR results in RDS
         cursor.execute("INSERT INTO ocr_results (plate_text, confidence, image_s3_url) VALUES (%s, %s, %s)", 
                        (ocr_text.strip(), confidence, s3_url))
         conn.commit()
 
-        # Draw Bounding Box
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-    # Display FPS and Time
     cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     timestamp_display = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cv2.putText(frame, timestamp_display, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-    # Show Output
     cv2.imshow("License Plate Detection", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Cleanup
 cap.release()
 cv2.destroyAllWindows()
 cursor.close()
