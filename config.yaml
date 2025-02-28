@@ -1,0 +1,7 @@
+model_path: "models/best.pt"
+source: 0  
+save_dir: "results"  
+device: "cpu"  
+img_size: 640 
+conf_threshold: 0.5 
+iou_threshold: 0.5  
