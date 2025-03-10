@@ -1,5 +1,5 @@
 model_path: "models/best.pt"
-source: 0  
+source: 'example.jpg'
 save_dir: "results"  
 device: "cpu"  
 img_size: 640 

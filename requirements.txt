@@ -6,3 +6,6 @@ torchvision
 torchaudio
 boto3
 pymysql
+onnx
+onnxruntime
+
