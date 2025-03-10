@@ -8,4 +8,5 @@ boto3
 pymysql
 onnx
 onnxruntime
-
+tensorrt
+pycuda
