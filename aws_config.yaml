@@ -1,0 +1,13 @@
+# AWS Configuration for ANPR Project on Jetson Nano
+# Replace the placeholder values with your actual AWS credentials and resource names.
+
+# AWS Region (e.g., us-east-1, ap-south-1)
+s3_region: "your-aws-region-here"
+
+# S3 Bucket name for storing detected plate images
+s3_bucket: "your-unique-bucket-name-here"
+
+# RDS Database Configuration
+rds_host: "your-database-instance.xxxxxxxxxxxx.region.rds.amazonaws.com"
+rds_user: "your_database_username"
+rds_password: "your_secure_database_password"

@@ -1,7 +1,8 @@
-model_path: "models/best.engine"  # TensorRT engine file
-source: 0  # Webcam or video file path
-save_dir: "results"  # Output folder
-device: "cuda"  # Ensure CUDA is available
-img_size: 640  # Image size for inference
-conf_threshold: 0.5  # Confidence threshold
-iou_threshold: 0.5  # IOU threshold for NMS
+# config.yaml - For TensorRT on Jetson
+model_path: "models/best.engine"  # Changed from .pt or .onnx
+source: 0                        # 0 for camera, or video file path
+save_dir: "results"  
+device: "cuda"                   # Will use CUDA
+img_size: 640 
+conf_threshold: 0.5 
+iou_threshold: 0.5
