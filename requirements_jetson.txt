@@ -1,26 +1,139 @@
-# JetPack 6 Requirements - TensorRT 10.x, Python 3.10+
-# =====================================================
+# ========================================================
+# ANPR System Requirements for Jetson Nano (JetPack 6)
+# ========================================================
+# Install with: pip install -r requirements.txt
 
-# Core dependencies
-numpy>=1.24.0
-opencv-python>=4.8.0
-Pillow>=10.0.0
-pyyaml>=6.0
-boto3>=1.34.0
-pymysql>=1.1.0
+# 🔧 CORE SYSTEM DEPENDENCIES
+# ----------------------------
+# Must install in THIS order on Jetson:
 
-# Research & graphing
-matplotlib>=3.7.0
-pandas>=2.0.0
-scipy>=1.11.0
-psutil>=5.9.0
-seaborn>=0.12.0        # Enhanced visualizations
+# 1. PyTorch for JetPack 6 (ARM64)
+# NOTE: PyTorch must be installed via NVIDIA's repository, NOT via pip
+# Run this separately: pip install torch torchvision --extra-index-url https://pypi.nvidia.com
 
-# AI/ML packages
-ultralytics>=8.0.0     # For ONNX export verification
-onnx>=1.14.0
-onnxruntime-gpu>=1.15.0
+# 2. CUDA and TensorRT are pre-installed in JetPack
 
-# System monitoring
-gpustat>=1.0.0
-py3nvml>=0.2.7
+# 3. Core computer vision
+numpy==1.24.0
+opencv-python==4.8.1.78
+Pillow==10.1.0
+
+# 4. YAML configuration
+pyyaml==6.0.1
+
+# 5. TensorRT Python bindings (should be pre-installed, but verify)
+# tensorrt==10.0.0  # Pre-installed with JetPack 6
+
+# 🎯 TENSORRT & GPU DEPENDENCIES
+# ------------------------------
+# PyCUDA for TensorRT GPU operations
+pycuda==2023.1.2
+
+# 🗄️ DATABASE DEPENDENCIES
+# ------------------------
+# MySQL client for RDS
+pymysql==1.1.0
+mysql-connector-python==8.2.0
+
+# 🌐 AWS SERVICES DEPENDENCIES
+# ----------------------------
+# AWS SDK for Python
+boto3==1.34.0
+botocore==1.34.0
+awscli==1.29.0
+
+# 📊 RESEARCH & VISUALIZATION
+# ---------------------------
+# Data manipulation
+pandas==2.1.4
+# Matplotlib with Agg backend (headless)
+matplotlib==3.8.2
+# Statistical visualization
+seaborn==0.13.0
+# Scientific computing
+scipy==1.11.4
+
+# 📈 SYSTEM MONITORING
+# --------------------
+# System resource monitoring
+psutil==5.9.6
+# GPU monitoring (Jetson compatible)
+gpustat==1.1
+# NVIDIA management library
+py3nvml==0.2.7
+
+# 🌐 WEB DASHBOARD
+# ----------------
+# Flask for web dashboard
+Flask==3.0.0
+Werkzeug==3.0.1
+Jinja2==3.1.2
+# Async support
+asyncio==3.4.3
+# Charting for web dashboard (if using)
+chart.js==0.1.0
+
+# 📁 FILE HANDLING & UTILITIES
+# ----------------------------
+# JSON handling
+ujson==5.8.0
+# Data serialization
+msgpack==1.0.7
+# Hash functions
+hashlib==20081119
+
+# 🧪 TESTING & DEVELOPMENT
+# ------------------------
+# Testing framework
+pytest==7.4.3
+# Mocking for tests
+pytest-mock==3.12.0
+# Code coverage
+coverage==7.4.0
+
+# ⚡ OPTIMIZATION LIBRARIES
+# ------------------------
+# Fast array operations
+numba==0.58.1
+# Image processing acceleration
+scikit-image==0.22.0
+# Thread pool for parallel processing
+threadpoolctl==3.2.0
+
+# 🛡️ SECURITY
+# -----------
+# Cryptography for secure operations
+cryptography==41.0.7
+# SSL/TLS support
+pyOpenSSL==23.2.0
+
+# 📝 LOGGING
+# ----------
+# Structured logging
+structlog==23.2.0
+# Log rotation
+logging-dict-config==1.0.3
+
+# 🔗 NETWORK UTILITIES
+# --------------------
+# HTTP client
+requests==2.31.0
+# WebSocket support
+websockets==12.0
+# URL parsing
+urllib3==2.0.7
+
+# ========================================================
+# JETSON-SPECIFIC INSTALLATION NOTES
+# ========================================================
+
+# ⚠️ IMPORTANT: Jetson Nano has limited RAM (4GB)
+# Consider creating swap space before installing:
+# sudo fallocate -l 4G /swapfile
+# sudo chmod 600 /swapfile
+# sudo mkswap /swapfile
+# sudo swapon /swapfile
+
+# ⚠️ Some packages may need to be built from source on Jetson
+# Use these flags for compilation:
+# CFLAGS="-march=armv8-a -mtune=cortex-a57 -O3" pip install package-name

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ANPR System for JetPack 6 with TensorRT 10.x
-Complete with 7 research graphs for paper
+Complete with Database, Web Dashboard & 7 Research Graphs
 """
 import cv2
 import numpy as np
@@ -11,6 +11,7 @@ import time
 import json
 import threading
 import queue
+import asyncio
 from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
@@ -37,6 +38,481 @@ import gpustat
 import boto3
 import pymysql
 
+# Web Dashboard imports
+from flask import Flask, render_template, jsonify, Response
+from threading import Thread
+
+# ==================== FLASK WEB DASHBOARD ====================
+class WebDashboard:
+    """Real-time web dashboard for monitoring"""
+    
+    def __init__(self, host='0.0.0.0', port=5000):
+        self.app = Flask(__name__)
+        self.host = host
+        self.port = port
+        self.detections_data = []
+        self.system_metrics = []
+        self.setup_routes()
+        
+    def setup_routes(self):
+        """Setup Flask routes"""
+        
+        @self.app.route('/')
+        def index():
+            return render_template('dashboard.html')
+        
+        @self.app.route('/api/detections')
+        def get_detections():
+            return jsonify(self.detections_data[-100:])  # Last 100 detections
+        
+        @self.app.route('/api/metrics')
+        def get_metrics():
+            return jsonify(self.system_metrics[-100:] if self.system_metrics else [])
+        
+        @self.app.route('/api/stats')
+        def get_stats():
+            if not self.detections_data:
+                return jsonify({})
+            
+            df = pd.DataFrame(self.detections_data)
+            stats = {
+                'total_detections': len(df),
+                'unique_plates': df['plate_text'].nunique() if 'plate_text' in df.columns else 0,
+                'avg_confidence': df['confidence'].mean() if 'confidence' in df.columns else 0,
+                'avg_fps': df['fps'].mean() if 'fps' in df.columns else 0,
+                'recent_detections': self.detections_data[-10:],
+                'timestamp': datetime.now().isoformat()
+            }
+            return jsonify(stats)
+        
+        @self.app.route('/api/live_feed')
+        def live_feed():
+            """Live video feed (SSE)"""
+            def generate_frames():
+                # This would connect to your camera feed
+                # For now, return placeholder
+                while True:
+                    time.sleep(0.5)
+                    yield f"data: {json.dumps({'frame': 'live_feed_placeholder'})}\n\n"
+            
+            return Response(generate_frames(), mimetype='text/event-stream')
+    
+    def add_detection(self, detection):
+        """Add a new detection to dashboard"""
+        self.detections_data.append(detection)
+        # Keep only last 1000 entries to prevent memory issues
+        if len(self.detections_data) > 1000:
+            self.detections_data = self.detections_data[-1000:]
+    
+    def add_system_metrics(self, metrics):
+        """Add system metrics"""
+        self.system_metrics.append(metrics)
+        if len(self.system_metrics) > 1000:
+            self.system_metrics = self.system_metrics[-1000:]
+    
+    def run(self):
+        """Run Flask dashboard in background thread"""
+        print(f"🌐 Starting Web Dashboard on http://{self.host}:{self.port}")
+        Thread(target=lambda: self.app.run(
+            host=self.host, 
+            port=self.port, 
+            debug=False, 
+            threaded=True,
+            use_reloader=False
+        )).start()
+
+# ==================== ENHANCED DATABASE MANAGER ====================
+class DatabaseManager:
+    """Enhanced RDS MySQL database manager with connection pooling"""
+    
+    def __init__(self, config: Dict):
+        self.config = config
+        self.connection = None
+        self.cursor = None
+        self.connect()
+        self.create_tables()
+        
+    def connect(self):
+        """Establish database connection with retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.connection = pymysql.connect(
+                    host=self.config['rds_host'],
+                    user=self.config['rds_user'],
+                    password=self.config['rds_password'],
+                    database=self.config.get('rds_database', 'license_plate_detection'),
+                    port=self.config.get('rds_port', 3306),
+                    charset='utf8mb4',
+                    cursorclass=pymysql.cursors.DictCursor,
+                    connect_timeout=self.config.get('connect_timeout', 10),
+                    autocommit=True
+                )
+                self.cursor = self.connection.cursor()
+                print(f"✅ Database connected: {self.config['rds_host']}")
+                return
+            except Exception as e:
+                print(f"⚠ Database connection attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    print("❌ Max retries reached. Continuing without database.")
+                    self.connection = None
+                    self.cursor = None
+    
+    def create_tables(self):
+        """Create all necessary tables"""
+        if not self.cursor:
+            return
+            
+        tables = {
+            'detections': """
+                CREATE TABLE IF NOT EXISTS detections (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    camera_id VARCHAR(50) DEFAULT 'jetson-nano',
+                    
+                    -- Detection info
+                    plate_text VARCHAR(100),
+                    confidence DECIMAL(5,2),
+                    model_confidence DECIMAL(5,2),
+                    
+                    -- Image info
+                    image_url VARCHAR(500),
+                    s3_key VARCHAR(500),
+                    
+                    -- Bounding box
+                    bbox_x1 INT,
+                    bbox_y1 INT,
+                    bbox_x2 INT,
+                    bbox_y2 INT,
+                    
+                    -- Processing metrics
+                    inference_time_ms DECIMAL(10,2),
+                    ocr_time_ms DECIMAL(10,2),
+                    total_time_ms DECIMAL(10,2),
+                    
+                    -- System info
+                    fps DECIMAL(5,2),
+                    memory_usage_mb INT,
+                    cpu_usage_percent DECIMAL(5,2),
+                    gpu_usage_percent DECIMAL(5,2),
+                    temperature_c DECIMAL(5,2),
+                    
+                    -- Indexes
+                    INDEX idx_timestamp (timestamp),
+                    INDEX idx_plate_text (plate_text(10)),
+                    INDEX idx_confidence (confidence),
+                    INDEX idx_camera (camera_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            
+            'system_metrics': """
+                CREATE TABLE IF NOT EXISTS system_metrics (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    fps DECIMAL(5,2),
+                    inference_time_ms DECIMAL(10,2),
+                    memory_usage_mb INT,
+                    cpu_usage_percent DECIMAL(5,2),
+                    gpu_usage_percent DECIMAL(5,2),
+                    temperature_c DECIMAL(5,2),
+                    detections_count INT,
+                    camera_id VARCHAR(50),
+                    INDEX idx_timestamp (timestamp),
+                    INDEX idx_camera (camera_id)
+                )
+            """,
+            
+            'plate_analytics': """
+                CREATE TABLE IF NOT EXISTS plate_analytics (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    plate_hash VARCHAR(64),
+                    plate_text VARCHAR(100),
+                    first_seen TIMESTAMP,
+                    last_seen TIMESTAMP,
+                    detection_count INT DEFAULT 1,
+                    avg_confidence DECIMAL(5,2),
+                    max_confidence DECIMAL(5,2),
+                    location VARCHAR(100),
+                    camera_id VARCHAR(50),
+                    INDEX idx_plate_hash (plate_hash),
+                    INDEX idx_last_seen (last_seen),
+                    INDEX idx_plate_text (plate_text(10))
+                )
+            """,
+            
+            'performance_logs': """
+                CREATE TABLE IF NOT EXISTS performance_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    experiment_name VARCHAR(100),
+                    total_frames INT,
+                    avg_fps DECIMAL(5,2),
+                    avg_inference_time_ms DECIMAL(10,2),
+                    total_detections INT,
+                    avg_confidence DECIMAL(5,2),
+                    memory_peak_mb INT,
+                    temperature_peak_c DECIMAL(5,2),
+                    INDEX idx_timestamp (timestamp),
+                    INDEX idx_experiment (experiment_name)
+                )
+            """
+        }
+        
+        for table_name, create_sql in tables.items():
+            try:
+                self.cursor.execute(create_sql)
+                print(f"   ✓ Table '{table_name}' verified")
+            except Exception as e:
+                print(f"   ⚠ Table '{table_name}' error: {e}")
+        
+        self.connection.commit()
+    
+    def save_detection(self, detection_data: Dict) -> bool:
+        """Save a detection to database"""
+        if not self.cursor:
+            return False
+            
+        try:
+            sql = """
+            INSERT INTO detections 
+            (camera_id, plate_text, confidence, model_confidence, 
+             image_url, s3_key, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+             inference_time_ms, ocr_time_ms, total_time_ms, 
+             fps, memory_usage_mb, cpu_usage_percent, gpu_usage_percent, temperature_c)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                detection_data.get('camera_id', 'jetson-nano'),
+                detection_data.get('plate_text', ''),
+                detection_data.get('confidence', 0),
+                detection_data.get('model_confidence', 0),
+                detection_data.get('image_url', ''),
+                detection_data.get('s3_key', ''),
+                detection_data.get('bbox_x1', 0),
+                detection_data.get('bbox_y1', 0),
+                detection_data.get('bbox_x2', 0),
+                detection_data.get('bbox_y2', 0),
+                detection_data.get('inference_time_ms', 0),
+                detection_data.get('ocr_time_ms', 0),
+                detection_data.get('total_time_ms', 0),
+                detection_data.get('fps', 0),
+                detection_data.get('memory_usage_mb', 0),
+                detection_data.get('cpu_usage_percent', 0),
+                detection_data.get('gpu_usage_percent', 0),
+                detection_data.get('temperature_c', 0)
+            )
+            
+            self.cursor.execute(sql, values)
+            detection_id = self.cursor.lastrowid
+            
+            # Update plate analytics
+            self._update_plate_analytics(detection_data)
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Database save failed: {e}")
+            return False
+    
+    def _update_plate_analytics(self, detection_data: Dict):
+        """Update plate analytics table"""
+        try:
+            plate_text = detection_data.get('plate_text', '')
+            if not plate_text:
+                return
+                
+            plate_hash = hashlib.sha256(plate_text.encode()).hexdigest()[:64]
+            
+            # Check if plate exists
+            self.cursor.execute(
+                "SELECT id, detection_count FROM plate_analytics WHERE plate_hash = %s",
+                (plate_hash,)
+            )
+            existing = self.cursor.fetchone()
+            
+            if existing:
+                # Update existing
+                self.cursor.execute("""
+                    UPDATE plate_analytics 
+                    SET last_seen = NOW(),
+                        detection_count = detection_count + 1,
+                        avg_confidence = (avg_confidence * detection_count + %s) / (detection_count + 1),
+                        max_confidence = GREATEST(max_confidence, %s)
+                    WHERE plate_hash = %s
+                """, (
+                    detection_data.get('confidence', 0),
+                    detection_data.get('confidence', 0),
+                    plate_hash
+                ))
+            else:
+                # Insert new
+                self.cursor.execute("""
+                    INSERT INTO plate_analytics 
+                    (plate_hash, plate_text, first_seen, last_seen, 
+                     avg_confidence, max_confidence, camera_id)
+                    VALUES (%s, %s, NOW(), NOW(), %s, %s, %s)
+                """, (
+                    plate_hash,
+                    plate_text,
+                    detection_data.get('confidence', 0),
+                    detection_data.get('confidence', 0),
+                    detection_data.get('camera_id', 'jetson-nano')
+                ))
+                
+        except Exception as e:
+            print(f"⚠ Plate analytics update failed: {e}")
+    
+    def save_system_metrics(self, metrics: Dict) -> bool:
+        """Save system metrics to database"""
+        if not self.cursor:
+            return False
+            
+        try:
+            sql = """
+            INSERT INTO system_metrics 
+            (fps, inference_time_ms, memory_usage_mb, cpu_usage_percent,
+             gpu_usage_percent, temperature_c, detections_count, camera_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                metrics.get('fps', 0),
+                metrics.get('inference_time_ms', 0),
+                metrics.get('memory_usage_mb', 0),
+                metrics.get('cpu_usage_percent', 0),
+                metrics.get('gpu_usage_percent', 0),
+                metrics.get('temperature_c', 0),
+                metrics.get('detections_count', 0),
+                metrics.get('camera_id', 'jetson-nano')
+            )
+            
+            self.cursor.execute(sql, values)
+            return True
+            
+        except Exception as e:
+            print(f"⚠ Metrics save failed: {e}")
+            return False
+    
+    def get_recent_detections(self, limit: int = 50):
+        """Get recent detections"""
+        if not self.cursor:
+            return []
+            
+        try:
+            sql = """
+            SELECT 
+                id, timestamp, plate_text, confidence,
+                image_url, fps, inference_time_ms, temperature_c
+            FROM detections 
+            ORDER BY timestamp DESC 
+            LIMIT %s
+            """
+            
+            self.cursor.execute(sql, (limit,))
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Query failed: {e}")
+            return []
+    
+    def get_detection_stats(self, hours: int = 24):
+        """Get detection statistics"""
+        if not self.cursor:
+            return {}
+            
+        try:
+            sql = """
+            SELECT 
+                COUNT(*) as total_detections,
+                AVG(confidence) as avg_confidence,
+                MAX(confidence) as max_confidence,
+                MIN(confidence) as min_confidence,
+                AVG(fps) as avg_fps,
+                AVG(inference_time_ms) as avg_inference_time,
+                COUNT(DISTINCT plate_text) as unique_plates,
+                MAX(temperature_c) as max_temperature
+            FROM detections 
+            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL %s HOUR)
+            """
+            
+            self.cursor.execute(sql, (hours,))
+            result = self.cursor.fetchone()
+            
+            return {
+                'total_detections': result['total_detections'] if result else 0,
+                'avg_confidence': float(result['avg_confidence']) if result and result['avg_confidence'] else 0,
+                'avg_fps': float(result['avg_fps']) if result and result['avg_fps'] else 0,
+                'avg_inference_time': float(result['avg_inference_time']) if result and result['avg_inference_time'] else 0,
+                'unique_plates': result['unique_plates'] if result else 0,
+                'max_temperature': float(result['max_temperature']) if result and result['max_temperature'] else 0
+            }
+            
+        except Exception as e:
+            print(f"❌ Stats query failed: {e}")
+            return {}
+    
+    def save_performance_log(self, experiment_data: Dict):
+        """Save experiment performance log"""
+        if not self.cursor:
+            return False
+            
+        try:
+            sql = """
+            INSERT INTO performance_logs 
+            (experiment_name, total_frames, avg_fps, avg_inference_time_ms,
+             total_detections, avg_confidence, memory_peak_mb, temperature_peak_c)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                experiment_data.get('experiment_name', 'default'),
+                experiment_data.get('total_frames', 0),
+                experiment_data.get('avg_fps', 0),
+                experiment_data.get('avg_inference_time_ms', 0),
+                experiment_data.get('total_detections', 0),
+                experiment_data.get('avg_confidence', 0),
+                experiment_data.get('memory_peak_mb', 0),
+                experiment_data.get('temperature_peak_c', 0)
+            )
+            
+            self.cursor.execute(sql, values)
+            return True
+            
+        except Exception as e:
+            print(f"⚠ Performance log save failed: {e}")
+            return False
+    
+    def export_to_csv(self, table_name: str, filename: str):
+        """Export table data to CSV"""
+        if not self.cursor:
+            return False
+            
+        try:
+            sql = f"SELECT * FROM {table_name}"
+            self.cursor.execute(sql)
+            data = self.cursor.fetchall()
+            
+            if data:
+                df = pd.DataFrame(data)
+                df.to_csv(filename, index=False)
+                print(f"✅ Exported {len(df)} records from '{table_name}' to {filename}")
+                return True
+            return False
+            
+        except Exception as e:
+            print(f"❌ Export failed: {e}")
+            return False
+    
+    def close(self):
+        """Close database connection"""
+        if self.cursor:
+            self.cursor.close()
+        if self.connection:
+            self.connection.close()
+            print("✅ Database connection closed")
+
 # ==================== CONFIGURATION ====================
 @dataclass
 class SystemConfig:
@@ -51,11 +527,28 @@ class SystemConfig:
     max_frames: int
     use_tensorrt: bool
     research_mode: bool
+    enable_dashboard: bool
+    dashboard_host: str
+    dashboard_port: int
+    camera_id: str
     
     @classmethod
     def from_yaml(cls, config_path: str):
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
+        
+        # Set defaults
+        defaults = {
+            'enable_dashboard': True,
+            'dashboard_host': '0.0.0.0',
+            'dashboard_port': 5000,
+            'camera_id': 'jetson-nano'
+        }
+        
+        for key, default in defaults.items():
+            if key not in config_data:
+                config_data[key] = default
+        
         return cls(**config_data)
 
 # ==================== TENSORRT INFERENCE (TensorRT 10.x) ====================
@@ -939,115 +1432,221 @@ class ResearchMetricsCollector:
         print(f"📄 Summary report saved: {report_path}")
         print(f"📊 Raw data saved: {csv_path}")
 
-# ==================== AWS MANAGER ====================
+# ==================== AWS MANAGER (LOCAL ACCESS KEYS VERSION) ====================
 class AWSManager:
-    """Manages AWS services for ANPR system"""
+    """Manages AWS services for ANPR system with local access keys"""
     
-    def __init__(self, aws_config_path: str):
+    def __init__(self, aws_config_path: str, db_config: Dict):
+        print("🔐 Initializing AWS Manager with local access keys...")
+        
+        # Load configuration
         with open(aws_config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        # Initialize AWS clients
-        self.s3 = boto3.client(
-            "s3",
-            region_name=self.config["s3_region"]
-        )
+        # Validate required configuration
+        self._validate_config()
         
-        self.textract = boto3.client(
-            "textract",
-            region_name=self.config["s3_region"]
-        )
+        # Initialize AWS clients with access keys
+        self._init_aws_clients()
         
-        # Initialize database connection
-        self.db_connection = None
-        self.db_cursor = None
-        self._init_database()
+        # Initialize database manager
+        self.db_manager = DatabaseManager(db_config)
+        
+        print(f"✅ AWS Manager initialized for region: {self.aws_region}")
     
-    def _init_database(self):
-        """Initialize database connection"""
-        try:
-            self.db_connection = pymysql.connect(
-                host=self.config["rds_host"],
-                user=self.config["rds_user"],
-                password=self.config["rds_password"],
-                database="license_plate_detection",
-                connect_timeout=10
+    def _validate_config(self):
+        """Validate all required configuration parameters"""
+        required_keys = [
+            'aws_access_key_id',
+            'aws_secret_access_key',
+            'aws_region',
+            's3_bucket'
+        ]
+        
+        missing_keys = [key for key in required_keys if key not in self.config]
+        if missing_keys:
+            raise ValueError(
+                f"Missing required configuration in aws_config.yaml: {missing_keys}\n"
+                f"Please add: {', '.join(missing_keys)}"
             )
-            self.db_cursor = self.db_connection.cursor()
-            print("✅ Database connection established")
+        
+        # Set instance variables
+        self.aws_access_key = self.config['aws_access_key_id']
+        self.aws_secret_key = self.config['aws_secret_access_key']
+        self.aws_region = self.config['aws_region']
+        self.s3_bucket = self.config['s3_bucket']
+        
+        # Log masked key for security
+        masked_key = f"{self.aws_access_key[:4]}...{self.aws_access_key[-4:]}"
+        print(f"   Using AWS Key: {masked_key}")
+        print(f"   S3 Bucket: {self.s3_bucket}")
+        print(f"   AWS Region: {self.aws_region}")
+    
+    def _init_aws_clients(self):
+        """Initialize AWS clients using access keys"""
+        try:
+            # Create AWS session with access keys
+            self.aws_session = boto3.Session(
+                aws_access_key_id=self.aws_access_key,
+                aws_secret_access_key=self.aws_secret_key,
+                region_name=self.aws_region
+            )
+            
+            # Initialize S3 client
+            self.s3 = self.aws_session.client('s3')
+            
+            # Initialize Textract client
+            self.textract = self.aws_session.client('textract')
+            
+            # Test S3 connection
+            self._test_s3_connection()
+            
         except Exception as e:
-            print(f"⚠ Database connection failed: {e}")
-            print("⚠ Continuing without database functionality")
+            print(f"❌ AWS initialization failed: {e}")
+            print("\n🔧 Troubleshooting steps:")
+            print("   1. Verify aws_access_key_id and aws_secret_access_key in aws_config.yaml")
+            print("   2. Check if IAM user has required permissions (S3, Textract)")
+            print("   3. Ensure AWS region is correct")
+            raise
+    
+    def _test_s3_connection(self):
+        """Test S3 connection and bucket access"""
+        try:
+            # List buckets to test credentials
+            response = self.s3.list_buckets()
+            bucket_names = [b['Name'] for b in response['Buckets']]
+            
+            # Check if configured bucket exists
+            if self.s3_bucket not in bucket_names:
+                print(f"⚠ Warning: S3 bucket '{self.s3_bucket}' not found")
+                print(f"   Available buckets: {', '.join(bucket_names[:3])}...")
+                print(f"   You need to create bucket: {self.s3_bucket}")
+            else:
+                print(f"✅ S3 bucket '{self.s3_bucket}' verified")
+                
+        except Exception as e:
+            print(f"❌ S3 connection test failed: {e}")
+            print("   Check: AWS credentials, IAM permissions, network connectivity")
+            raise
     
     def upload_to_s3(self, local_path: str, s3_filename: str) -> str:
         """Upload file to S3 and return URL"""
         try:
-            self.s3.upload_file(local_path, self.config["s3_bucket"], s3_filename)
-            url = f"https://{self.config['s3_bucket']}.s3.{self.config['s3_region']}.amazonaws.com/{s3_filename}"
-            return url
+            # Optional: Add prefix/folder structure
+            s3_key = s3_filename
+            if 's3_prefix' in self.config:
+                s3_key = f"{self.config['s3_prefix'].rstrip('/')}/{s3_filename}"
+            
+            # Upload with metadata
+            extra_args = {
+                'Metadata': {
+                    'uploaded-by': 'jetson-anpr',
+                    'timestamp': datetime.now().isoformat(),
+                    'camera-id': 'jetson-nano'
+                }
+            }
+            
+            print(f"   Uploading to S3: {s3_key}")
+            self.s3.upload_file(local_path, self.s3_bucket, s3_key, ExtraArgs=extra_args)
+            
+            # Generate URL
+            url = f"https://{self.s3_bucket}.s3.{self.aws_region}.amazonaws.com/{s3_key}"
+            print(f"   ✓ Upload complete: {url[:80]}...")
+            
+            return url, s3_key
+            
         except Exception as e:
             print(f"❌ S3 upload failed: {e}")
-            return ""
+            return "", ""
     
     def extract_text(self, image_path: str) -> Tuple[str, float]:
         """Extract text from image using Amazon Textract"""
         try:
             with open(image_path, "rb") as f:
-                response = self.textract.detect_document_text(
-                    Document={"Bytes": f.read()}
-                )
+                image_bytes = f.read()
             
-            ocr_text = ""
-            confidence_sum = 0.0
-            line_count = 0
+            print(f"   Sending to Textract: {os.path.basename(image_path)}")
+            
+            response = self.textract.detect_document_text(
+                Document={"Bytes": image_bytes}
+            )
+            
+            # Process text lines
+            lines = []
+            confidences = []
             
             for block in response.get("Blocks", []):
                 if block["BlockType"] == "LINE":
-                    ocr_text += block["Text"] + " "
-                    confidence_sum += block.get("Confidence", 0)
-                    line_count += 1
+                    lines.append(block.get("Text", ""))
+                    confidences.append(block.get("Confidence", 0))
             
-            avg_confidence = confidence_sum / line_count if line_count > 0 else 0.0
-            return ocr_text.strip(), avg_confidence
+            # Combine lines
+            ocr_text = " ".join(lines).strip()
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+            
+            print(f"   ✓ Textract: '{ocr_text[:50]}...' (conf: {avg_confidence:.1f}%)")
+            
+            return ocr_text, avg_confidence
             
         except Exception as e:
             print(f"❌ Textract failed: {e}")
             return "", 0.0
     
-    def save_to_database(self, plate_text: str, confidence: float, image_url: str):
-        """Save results to database"""
-        if not self.db_cursor:
-            return False
-        
-        try:
-            self.db_cursor.execute(
-                """INSERT INTO ocr_results 
-                   (plate_text, confidence, image_s3_url) 
-                   VALUES (%s, %s, %s)""",
-                (plate_text, confidence, image_url)
-            )
-            self.db_connection.commit()
-            return True
-        except Exception as e:
-            print(f"❌ Database save failed: {e}")
-            return False
+    def save_detection(self, detection_data: Dict) -> bool:
+        """Save detection to database via DatabaseManager"""
+        return self.db_manager.save_detection(detection_data)
+    
+    def get_stats(self, hours: int = 24):
+        """Get detection statistics"""
+        return self.db_manager.get_detection_stats(hours)
+    
+    def get_recent_detections(self, limit: int = 50):
+        """Get recent detections"""
+        return self.db_manager.get_recent_detections(limit)
+    
+    def save_system_metrics(self, metrics: Dict):
+        """Save system metrics"""
+        return self.db_manager.save_system_metrics(metrics)
     
     def close(self):
-        """Close database connection"""
-        if self.db_cursor:
-            self.db_cursor.close()
-        if self.db_connection:
-            self.db_connection.close()
+        """Close all connections"""
+        if self.db_manager:
+            self.db_manager.close()
+        print("✅ AWS Manager closed")
 
 # ==================== MAIN ANPR SYSTEM ====================
 class ANPRSystem:
-    """Main ANPR system for JetPack 6"""
+    """Main ANPR system for JetPack 6 with enhanced database and dashboard"""
     
     def __init__(self, config_path: str, aws_config_path: str):
         # Load configurations
         self.config = SystemConfig.from_yaml(config_path)
-        self.aws_manager = AWSManager(aws_config_path)
+        
+        # Load AWS config for database
+        with open(aws_config_path, 'r') as f:
+            aws_config = yaml.safe_load(f)
+        
+        # Initialize AWS Manager with database
+        self.aws_manager = AWSManager(aws_config_path, {
+            'rds_host': aws_config['rds_host'],
+            'rds_user': aws_config['rds_user'],
+            'rds_password': aws_config['rds_password'],
+            'rds_database': aws_config.get('rds_database', 'license_plate_detection'),
+            'rds_port': aws_config.get('rds_port', 3306),
+            'connect_timeout': 10
+        })
+        
+        # Initialize research metrics
         self.metrics = ResearchMetricsCollector("jetson_anpr_jp6")
+        
+        # Initialize web dashboard
+        self.dashboard = None
+        if self.config.enable_dashboard:
+            self.dashboard = WebDashboard(
+                host=self.config.dashboard_host,
+                port=self.config.dashboard_port
+            )
+            self.dashboard.run()
         
         # Create output directories
         os.makedirs(os.path.join(self.config.save_dir, "images"), exist_ok=True)
@@ -1062,14 +1661,17 @@ class ANPRSystem:
         # Performance tracking
         self.frame_count = 0
         self.prev_time = time.time()
+        self.total_detections = 0
         
         print("\n" + "="*60)
-        print("ANPR System for JetPack 6 - Research Edition")
+        print("ANPR System for JetPack 6 - Enhanced Edition")
         print("="*60)
         print(f"Model: {self.config.model_path}")
         print(f"Source: {self.config.source}")
         print(f"Device: {self.config.device}")
         print(f"Research Mode: {self.config.research_mode}")
+        if self.dashboard:
+            print(f"Web Dashboard: http://{self.config.dashboard_host}:{self.config.dashboard_port}")
         print("="*60 + "\n")
     
     def _init_model(self):
@@ -1151,7 +1753,7 @@ class ANPRSystem:
             
             # Upload to S3
             aws_start = time.time()
-            s3_url = self.aws_manager.upload_to_s3(img_path, img_filename)
+            s3_url, s3_key = self.aws_manager.upload_to_s3(img_path, img_filename)
             aws_time = time.time() - aws_start
             aws_time_total += aws_time
             
@@ -1171,9 +1773,43 @@ class ANPRSystem:
                 f.write(f"Model Confidence: {conf:.2f}\n")
                 f.write(f"S3 URL: {s3_url}\n")
             
+            # Prepare detection data for database
+            detection_data = {
+                'camera_id': self.config.camera_id,
+                'plate_text': ocr_text,
+                'confidence': ocr_confidence,
+                'model_confidence': conf,
+                'image_url': s3_url,
+                's3_key': s3_key,
+                'bbox_x1': x1,
+                'bbox_y1': y1,
+                'bbox_x2': x2,
+                'bbox_y2': y2,
+                'inference_time_ms': timing['inference_time'] * 1000,
+                'ocr_time_ms': ocr_time * 1000,
+                'total_time_ms': (timing['inference_time'] + ocr_time + aws_time) * 1000,
+                'fps': 0,  # Will be updated later
+                'memory_usage_mb': psutil.Process().memory_info().rss // 1024 // 1024,
+                'cpu_usage_percent': psutil.cpu_percent(),
+                'gpu_usage_percent': 0,  # Will be updated if GPU stats available
+                'temperature_c': 0  # Will be updated
+            }
+            
             # Save to database
             if s3_url:
-                self.aws_manager.save_to_database(ocr_text, ocr_confidence, s3_url)
+                self.aws_manager.save_detection(detection_data)
+                self.total_detections += 1
+            
+            # Add to dashboard
+            if self.dashboard:
+                self.dashboard.add_detection({
+                    'timestamp': datetime.now().isoformat(),
+                    'plate_text': ocr_text,
+                    'confidence': ocr_confidence,
+                    'image_url': s3_url,
+                    'bbox': [x1, y1, x2, y2],
+                    'model_confidence': conf
+                })
             
             # Draw bounding box on frame
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -1196,21 +1832,29 @@ class ANPRSystem:
         fps = 1 / (curr_time - self.prev_time) if self.frame_count > 0 else 0
         self.prev_time = curr_time
         
+        # Get system stats
+        memory = psutil.virtual_memory()
+        cpu = psutil.cpu_percent()
+        
         # Display metrics
         y_offset = 30
-        line_height = 30
+        line_height = 25
         
         metrics_text = [
             f"FPS: {fps:.1f}",
             f"Frame: {self.frame_count}",
             f"Detections: {len(detections)}",
+            f"Total Detections: {self.total_detections}",
             f"Inference: {timing.get('inference_time', 0)*1000:.1f}ms",
-            f"Total: {sum(timing.values())*1000:.1f}ms"
+            f"OCR: {timing.get('ocr_time', 0)*1000:.1f}ms",
+            f"Memory: {memory.percent}%",
+            f"CPU: {cpu}%"
         ]
         
-        for text in metrics_text:
+        for i, text in enumerate(metrics_text):
+            color = (0, 255, 255) if i < 4 else (255, 255, 0)
             cv2.putText(frame, text, (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             y_offset += line_height
         
         # Display timestamp
@@ -1218,12 +1862,20 @@ class ANPRSystem:
         cv2.putText(frame, timestamp, (10, frame.shape[0] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
+        # Display camera ID
+        cv2.putText(frame, f"Camera: {self.config.camera_id}", 
+                   (frame.shape[1] - 200, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
         return fps
     
     def run(self):
         """Main execution loop"""
         print("▶ Starting ANPR processing...")
-        print("   Press 'q' to quit, 's' to save current frame")
+        print("   Press 'q' to quit, 's' to save current frame, 'd' to show dashboard stats")
+        
+        last_stats_time = time.time()
+        stats_interval = 10  # Show stats every 10 seconds
         
         try:
             while self.cap.isOpened():
@@ -1242,6 +1894,21 @@ class ANPRSystem:
                 fps = self.display_metrics(frame, detections, timing)
                 
                 # Record metrics for research
+                memory_mb = psutil.Process().memory_info().rss // 1024 // 1024
+                cpu_percent = psutil.cpu_percent()
+                
+                # Get GPU stats if available
+                gpu_percent = 0
+                temperature = 0
+                try:
+                    gpu_stats = gpustat.GPUStatCollection.new_query()
+                    if gpu_stats.gpus:
+                        gpu = gpu_stats.gpus[0]
+                        gpu_percent = gpu.utilization
+                        temperature = gpu.temperature
+                except:
+                    pass
+                
                 self.metrics.record_frame(
                     fps=fps,
                     inference_times=timing.get('inference_time', 0),
@@ -1249,11 +1916,38 @@ class ANPRSystem:
                     postprocess_times=timing.get('postprocess_time', 0),
                     ocr_times=timing.get('ocr_time', 0),
                     aws_times=timing.get('aws_time', 0),
-                    detection_counts=len(detections)
+                    detection_counts=len(detections),
+                    memory_usage=psutil.virtual_memory().percent,
+                    gpu_utilization=gpu_percent,
+                    temperatures=temperature
                 )
                 
+                # Save system metrics to database
+                system_metrics = {
+                    'fps': fps,
+                    'inference_time_ms': timing.get('inference_time', 0) * 1000,
+                    'memory_usage_mb': memory_mb,
+                    'cpu_usage_percent': cpu_percent,
+                    'gpu_usage_percent': gpu_percent,
+                    'temperature_c': temperature,
+                    'detections_count': len(detections),
+                    'camera_id': self.config.camera_id
+                }
+                self.aws_manager.save_system_metrics(system_metrics)
+                
+                # Add to dashboard
+                if self.dashboard:
+                    self.dashboard.add_system_metrics({
+                        'timestamp': datetime.now().isoformat(),
+                        'fps': fps,
+                        'inference_time_ms': timing.get('inference_time', 0) * 1000,
+                        'memory_usage_mb': memory_mb,
+                        'cpu_usage_percent': cpu_percent,
+                        'detections': len(detections)
+                    })
+                
                 # Display frame
-                cv2.imshow("ANPR System - JetPack 6", frame)
+                cv2.imshow(f"ANPR System - {self.config.camera_id}", frame)
                 
                 # Print progress every 30 frames
                 if self.frame_count % 30 == 0:
@@ -1261,6 +1955,17 @@ class ANPRSystem:
                     print(f"   Processed {self.frame_count} frames | "
                           f"Avg FPS: {avg_fps:.1f} | "
                           f"Detections: {sum(self.metrics.metrics['detection_counts'][-30:])}")
+                
+                # Show database stats periodically
+                if time.time() - last_stats_time > stats_interval:
+                    stats = self.aws_manager.get_stats(1)  # Last hour
+                    if stats:
+                        print(f"\n📊 Last Hour Stats:")
+                        print(f"   Total Detections: {stats['total_detections']}")
+                        print(f"   Avg Confidence: {stats['avg_confidence']:.2%}")
+                        print(f"   Unique Plates: {stats['unique_plates']}")
+                        print(f"   Avg FPS: {stats['avg_fps']:.1f}")
+                    last_stats_time = time.time()
                 
                 # Check for exit conditions
                 key = cv2.waitKey(1) & 0xFF
@@ -1272,6 +1977,16 @@ class ANPRSystem:
                     save_path = f"frame_{self.frame_count}_{datetime.now().strftime('%H%M%S')}.jpg"
                     cv2.imwrite(save_path, frame)
                     print(f"💾 Frame saved: {save_path}")
+                elif key == ord('d'):
+                    # Show dashboard stats
+                    stats = self.aws_manager.get_stats(24)
+                    if stats:
+                        print(f"\n📈 24-Hour Dashboard Stats:")
+                        print(f"   Total Detections: {stats['total_detections']}")
+                        print(f"   Avg Confidence: {stats['avg_confidence']:.2%}")
+                        print(f"   Unique Plates: {stats['unique_plates']}")
+                        print(f"   Avg FPS: {stats['avg_fps']:.1f}")
+                        print(f"   Max Temperature: {stats['max_temperature']:.1f}°C")
                 
                 # Check max frames limit
                 if self.config.max_frames > 0 and self.frame_count >= self.config.max_frames:
@@ -1304,19 +2019,43 @@ class ANPRSystem:
         if self.config.research_mode:
             print("\n📊 Generating research graphs...")
             self.metrics.generate_all_graphs()
+            
+            # Save performance log
+            experiment_data = {
+                'experiment_name': self.metrics.experiment_name,
+                'total_frames': self.frame_count,
+                'avg_fps': np.mean(self.metrics.metrics['fps']) if self.metrics.metrics['fps'] else 0,
+                'avg_inference_time_ms': np.mean(self.metrics.metrics['inference_times']) * 1000 if self.metrics.metrics['inference_times'] else 0,
+                'total_detections': self.total_detections,
+                'avg_confidence': np.mean(self.metrics.metrics['confidence_scores']) if self.metrics.metrics['confidence_scores'] else 0,
+                'memory_peak_mb': max([psutil.Process().memory_info().rss // 1024 // 1024] * len(self.metrics.metrics['memory_usage'])) if self.metrics.metrics['memory_usage'] else 0,
+                'temperature_peak_c': max(self.metrics.metrics['temperatures']) if self.metrics.metrics['temperatures'] else 0
+            }
+            
+            if self.aws_manager.db_manager:
+                self.aws_manager.db_manager.save_performance_log(experiment_data)
+        
+        # Export data to CSV
+        if self.aws_manager.db_manager:
+            self.aws_manager.db_manager.export_to_csv('detections', 'detections_export.csv')
+            self.aws_manager.db_manager.export_to_csv('system_metrics', 'system_metrics_export.csv')
         
         # Final statistics
         print("\n" + "="*60)
         print("EXPERIMENT SUMMARY")
         print("="*60)
         print(f"Total frames processed: {self.frame_count}")
-        print(f"Total detections: {sum(self.metrics.metrics['detection_counts'])}")
+        print(f"Total detections: {self.total_detections}")
         
         if self.metrics.metrics['fps']:
             avg_fps = np.mean(self.metrics.metrics['fps'])
             print(f"Average FPS: {avg_fps:.1f}")
         
         print(f"Results saved to: {self.metrics.results_dir}")
+        
+        if self.dashboard:
+            print(f"Web Dashboard available at: http://{self.config.dashboard_host}:{self.config.dashboard_port}")
+        
         print("="*60)
 
 # ==================== MAIN EXECUTION ====================
@@ -1328,10 +2067,29 @@ def main():
     parser.add_argument('--config', default='config.yaml', help='Configuration file')
     parser.add_argument('--aws-config', default='aws_config.yaml', help='AWS configuration file')
     parser.add_argument('--test', action='store_true', help='Test mode (no AWS)')
+    parser.add_argument('--export', action='store_true', help='Export database to CSV and exit')
     
     args = parser.parse_args()
     
     try:
+        if args.export:
+            # Just export data and exit
+            with open(args.aws_config, 'r') as f:
+                aws_config = yaml.safe_load(f)
+            
+            db_manager = DatabaseManager({
+                'rds_host': aws_config['rds_host'],
+                'rds_user': aws_config['rds_user'],
+                'rds_password': aws_config['rds_password'],
+                'rds_database': aws_config.get('rds_database', 'license_plate_detection')
+            })
+            
+            db_manager.export_to_csv('detections', 'detections_export.csv')
+            db_manager.export_to_csv('system_metrics', 'system_metrics_export.csv')
+            db_manager.export_to_csv('plate_analytics', 'plate_analytics_export.csv')
+            db_manager.close()
+            return 0
+        
         # Create and run ANPR system
         anpr_system = ANPRSystem(args.config, args.aws_config)
         anpr_system.run()

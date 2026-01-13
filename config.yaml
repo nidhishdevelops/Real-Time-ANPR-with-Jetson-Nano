@@ -1,10 +1,15 @@
-# ANPR System Configuration - JetPack 6 Edition
-model_path: "models/best.engine"  # TensorRT engine file
-source: "0"                       # Camera index or video file path
-save_dir: "/home/nvidia/results"  # Output directory (adjust username)
-device: "cuda"                    # Use CUDA
-img_size: 640                     # Input image size
-conf_threshold: 0.5               # Confidence threshold
-iou_threshold: 0.5                # IoU threshold for NMS
-max_frames: 0                     # 0 = unlimited, set for experiments
-use_tensorrt: true                # Use TensorRT inference
+# config.yaml - Update these values
+model_path: "models/best.engine"  # Your TensorRT model
+source: "0"                       # 0 for USB camera, 1 for second camera, or video file path
+save_dir: "/home/nvidia/results"  # Output directory
+device: "cuda"
+img_size: 640
+conf_threshold: 0.5
+iou_threshold: 0.5
+max_frames: 0                     # 0 = unlimited
+use_tensorrt: true
+research_mode: true
+enable_dashboard: true
+dashboard_host: "0.0.0.0"        # Accessible from any device
+dashboard_port: 5000
+camera_id: "jetson-nano-01"

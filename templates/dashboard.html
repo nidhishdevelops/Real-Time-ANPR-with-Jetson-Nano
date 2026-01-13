@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ANPR System Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .stat-item { padding: 10px; background: #e9ecef; border-radius: 5px; }
+        .detection-list { max-height: 400px; overflow-y: auto; }
+        .detection-item { border-bottom: 1px solid #ddd; padding: 10px 0; }
+        .live-data { background: #e8f5e8; }
+        h1, h2, h3 { color: #333; }
+        .last-update { font-size: 0.9em; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>🚗 ANPR System Dashboard</h1>
+    <div class="last-update" id="lastUpdate">Last update: --:--:--</div>
+    
+    <div class="dashboard">
+        <!-- System Stats -->
+        <div class="card">
+            <h2>📊 System Statistics</h2>
+            <div class="stats-grid" id="systemStats">
+                <div class="stat-item">FPS: <span id="fps">0</span></div>
+                <div class="stat-item">CPU: <span id="cpu">0%</span></div>
+                <div class="stat-item">Memory: <span id="memory">0%</span></div>
+                <div class="stat-item">Detections: <span id="totalDetections">0</span></div>
+                <div class="stat-item">Avg Confidence: <span id="avgConfidence">0%</span></div>
+                <div class="stat-item">Unique Plates: <span id="uniquePlates">0</span></div>
+            </div>
+        </div>
+        
+        <!-- Live Metrics Chart -->
+        <div class="card">
+            <h2>📈 Performance Metrics</h2>
+            <canvas id="metricsChart" width="400" height="200"></canvas>
+        </div>
+        
+        <!-- Recent Detections -->
+        <div class="card">
+            <h2>🔍 Recent Detections</h2>
+            <div class="detection-list" id="detectionList">
+                <div class="detection-item">No detections yet...</div>
+            </div>
+        </div>
+        
+        <!-- Plate Analytics -->
+        <div class="card">
+            <h2>🏆 Top Plates</h2>
+            <div id="topPlates">Loading...</div>
+        </div>
+    </div>
+    
+    <script>
+        let metricsChart;
+        
+        // Initialize chart
+        function initChart() {
+            const ctx = document.getElementById('metricsChart').getContext('2d');
+            metricsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'FPS',
+                        data: [],
+                        borderColor: 'rgb(75, 192, 192)',
+                        tension: 0.1
+                    }, {
+                        label: 'Inference Time (ms)',
+                        data: [],
+                        borderColor: 'rgb(255, 99, 132)',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: { beginAtZero: true }
+                    }
+                }
+            });
+        }
+        
+        // Update dashboard data
+        async function updateDashboard() {
+            try {
+                // Get stats
+                const statsResponse = await axios.get('/api/stats');
+                const stats = statsResponse.data;
+                
+                // Update system stats
+                document.getElementById('fps').textContent = stats.avg_fps?.toFixed(1) || '0';
+                document.getElementById('totalDetections').textContent = stats.total_detections || '0';
+                document.getElementById('avgConfidence').textContent = 
+                    stats.avg_confidence ? (stats.avg_confidence * 100).toFixed(1) + '%' : '0%';
+                document.getElementById('uniquePlates').textContent = stats.unique_plates || '0';
+                
+                // Get recent detections
+                const detectionsResponse = await axios.get('/api/detections');
+                const detections = detectionsResponse.data;
+                
+                // Update detection list
+                const detectionList = document.getElementById('detectionList');
+                if (detections.length > 0) {
+                    detectionList.innerHTML = detections.slice(0, 10).map(det => `
+                        <div class="detection-item">
+                            <strong>${det.plate_text || 'Unknown'}</strong><br>
+                            Confidence: ${(det.confidence * 100).toFixed(1)}%<br>
+                            Time: ${new Date(det.timestamp).toLocaleTimeString()}
+                        </div>
+                    `).join('');
+                }
+                
+                // Get system metrics
+                const metricsResponse = await axios.get('/api/metrics');
+                const metrics = metricsResponse.data;
+                
+                // Update chart
+                if (metrics.length > 0) {
+                    const recentMetrics = metrics.slice(-20);
+                    metricsChart.data.labels = recentMetrics.map(m => 
+                        new Date(m.timestamp).toLocaleTimeString());
+                    metricsChart.data.datasets[0].data = recentMetrics.map(m => m.fps);
+                    metricsChart.data.datasets[1].data = recentMetrics.map(m => m.inference_time_ms);
+                    metricsChart.update();
+                }
+                
+                // Update last update time
+                document.getElementById('lastUpdate').textContent = 
+                    `Last update: ${new Date().toLocaleTimeString()}`;
+                
+            } catch (error) {
+                console.error('Error updating dashboard:', error);
+            }
+        }
+        
+        // Initialize and start updates
+        document.addEventListener('DOMContentLoaded', () => {
+            initChart();
+            updateDashboard();
+            setInterval(updateDashboard, 5000); // Update every 5 seconds
+        });
+    </script>
+</body>
+</html>
