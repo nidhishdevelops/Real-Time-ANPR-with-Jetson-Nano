@@ -1,8 +1,10 @@
-# config.yaml - For TensorRT on Jetson
-model_path: "models/best.engine"  # Changed from .pt or .onnx
-source: 0                        # 0 for camera, or video file path
-save_dir: "results"  
-device: "cuda"                   # Will use CUDA
-img_size: 640 
-conf_threshold: 0.5 
-iou_threshold: 0.5
+# ANPR System Configuration - JetPack 6 Edition
+model_path: "models/best.engine"  # TensorRT engine file
+source: "0"                       # Camera index or video file path
+save_dir: "/home/nvidia/results"  # Output directory (adjust username)
+device: "cuda"                    # Use CUDA
+img_size: 640                     # Input image size
+conf_threshold: 0.5               # Confidence threshold
+iou_threshold: 0.5                # IoU threshold for NMS
+max_frames: 0                     # 0 = unlimited, set for experiments
+use_tensorrt: true                # Use TensorRT inference
